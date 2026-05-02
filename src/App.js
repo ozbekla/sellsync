@@ -1,481 +1,4 @@
-import { useState, useEffect, useRef } from "react";
-
-// ─── constants ────────────────────────────────────────────────────────────────
-// Base platform definitions (template)
-const BASE_PLATFORMS = [
-  { baseId: "ebay",       name: "eBay",          icon: "🛒", maxPhotos: 24, renewDays: 7,  url: "https://www.ebay.com/sh/ovw"        },
-  { baseId: "facebook",   name: "Facebook",       icon: "📘", maxPhotos: 10, renewDays: 7,  url: "https://www.facebook.com/marketplace/selling/" },
-  { baseId: "mercari",    name: "Mercari",        icon: "🏷️", maxPhotos: 12, renewDays: 7,  url: "https://www.mercari.com/sell/"      },
-  { baseId: "offerup",    name: "OfferUp",        icon: "🤝", maxPhotos: 10, renewDays: 10, url: "https://offerup.com/sell/"          },
-  { baseId: "poshmark",   name: "Poshmark",       icon: "👗", maxPhotos: 16, renewDays: 3,  url: "https://poshmark.com/feed"          },
-  { baseId: "craigslist", name: "Craigslist",     icon: "📋", maxPhotos: 24, renewDays: 3,  url: "https://craigslist.org"             },
-  { baseId: "inspire",    name: "Inspire Uplift", icon: "✨", maxPhotos: 10, renewDays: 14, url: "https://www.inspireuplift.com/sell" },
-];
-
-const ACCS_KEY = "sellsync_accounts";
-const loadAccounts = () => {
-  try {
-    const r = localStorage.getItem(ACCS_KEY);
-    if (r) return JSON.parse(r);
-  } catch {}
-  // default: one account per platform
-  return BASE_PLATFORMS.map(p => ({ id: p.baseId + "_1", baseId: p.baseId, label: p.name, ...p }));
-};
-const saveAccounts = a => { try { localStorage.setItem(ACCS_KEY, JSON.stringify(a)); } catch {} };
-
-// PLATFORMS is now dynamic (derived from accounts), but we keep a static fallback for fee lookups etc.
-const PLATFORMS = BASE_PLATFORMS.map(p => ({ ...p, id: p.baseId }));
-
-const SHIPPING_OPTIONS = [
-  { id: "free",       label: "Ücretsiz Kargo" },
-  { id: "buyer",      label: "Alıcı Öder (Sabit)" },
-  { id: "calculated", label: "Alıcı Öder (Hesaplanan)" },
-  { id: "included",   label: "Fiyata Dahil" },
-  { id: "pickup",     label: "Elden Teslim" },
-  { id: "none",       label: "Kargo Yok" },
-];
-
-// ─── platform fees (updatable via AI) ────────────────────────────────────────
-const DEFAULT_FEES = {
-  ebay:       { pct: 13.25, fixed: 0.30, paymentPct: 0,    label: "13.25% + $0.30",   note: "Final value fee (most categories)" },
-  facebook:   { pct: 5,     fixed: 0,    paymentPct: 0,    label: "5% (shipped)",      note: "Free for local pickup" },
-  mercari:    { pct: 10,    fixed: 0,    paymentPct: 2.9,  label: "10% + 2.9% payment",note: "Selling fee + payment processing" },
-  offerup:    { pct: 7.9,   fixed: 0,    paymentPct: 0,    label: "7.9%",              note: "Promoted offers may vary" },
-  poshmark:   { pct: 20,    fixed: 0,    paymentPct: 0,    label: "20% (>$15) / $2.95",note: "Flat $2.95 for sales under $15" },
-  craigslist: { pct: 0,     fixed: 0,    paymentPct: 0,    label: "Free",              note: "Most categories free" },
-  inspire:    { pct: 18,    fixed: 0,    paymentPct: 0,    label: "~18%",              note: "Varies by category" },
-};
-const FEES_KEY = "sellsync_fees";
-const loadFees = () => { try { const r = localStorage.getItem(FEES_KEY); return r ? { ...DEFAULT_FEES, ...JSON.parse(r) } : DEFAULT_FEES; } catch { return DEFAULT_FEES; } };
-const saveFees = f => { try { localStorage.setItem(FEES_KEY, JSON.stringify(f)); } catch {} };
-
-function calcNet(price, shipping, shippingCost, fees, platId) {
-  const p    = parseFloat(price) || 0;
-  const sc   = parseFloat(shippingCost) || 0;
-  const fee  = fees[platId] || DEFAULT_FEES[platId] || { pct: 0, fixed: 0, paymentPct: 0 };
-  if (p === 0) return null;
-
-  // poshmark special rule
-  let feeAmt = 0;
-  if (platId === "poshmark") {
-    feeAmt = p < 15 ? 2.95 : p * 0.20;
-  } else {
-    feeAmt = (p * (fee.pct + fee.paymentPct)) / 100 + fee.fixed;
-  }
-
-  // shipping cost impact
-  let shippingImpact = 0;
-  if (shipping === "free") shippingImpact = sc; // seller pays shipping
-  if (shipping === "included") shippingImpact = sc;
-
-  const net = p - feeAmt - shippingImpact;
-  return { net: Math.max(0, net), feeAmt, feeLabel: fee.label };
-}
-
-const MAX_PHOTOS  = 10;
-const CONDITIONS  = ["New", "Like New", "Open Box", "Good", "Fair", "For Parts"];
-const CATEGORIES  = ["Electronics", "Clothing", "Home & Garden", "Toys", "Sports", "Automotive", "Other"];
-const genId       = () => Math.random().toString(36).substr(2, 9);
-const STORAGE_KEY  = "sellsync_v4";
-const NOTIF_KEY    = "sellsync_notifs";
-const loadNotifs   = () => { try { const r = localStorage.getItem(NOTIF_KEY); return r ? JSON.parse(r) : []; } catch { return []; } };
-const saveNotifs   = n => { try { localStorage.setItem(NOTIF_KEY, JSON.stringify(n)); } catch {} };
-const API_KEY_KEY = "sellsync_apikey";
-const DAY_MS      = 86400000;
-
-// ─── storage ─────────────────────────────────────────────────────────────────
-const load    = () => { try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : []; } catch { return []; } };
-const persist = d => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {} };
-const loadKey = () => { try { return localStorage.getItem(API_KEY_KEY) || ""; } catch { return ""; } };
-const saveKey = k => { try { localStorage.setItem(API_KEY_KEY, k); } catch {} };
-
-// per-platform defaults
-const defaultPlatformSettings = () =>
-  Object.fromEntries(PLATFORMS.map(p => [p.id, { price: "", shipping: "buyer", shippingCost: "", enabled: true }]));
-
-const emptyForm = () => ({
-  title: "", description: "", price: "", originalPrice: "",
-  condition: "New", category: "Electronics", sku: "",
-  quantity: "1", platforms: PLATFORMS.map(p => p.id),
-  notes: "", photos: [],
-  platformSettings: defaultPlatformSettings(),
-  platformTitles: {}, platformDescriptions: {},
-  listedAt: {},
-  // shipping / dimensions
-  weightLb: "", weightOz: "",
-  dimL: "", dimW: "", dimH: "",
-  shippingNotes: "",
-});
-
-function resizeImage(file, maxW = 1200) {
-  return new Promise(res => {
-    const img = new Image(), url = URL.createObjectURL(file);
-    img.onload = () => {
-      const s = Math.min(1, maxW / img.width);
-      const c = document.createElement("canvas");
-      c.width = img.width * s; c.height = img.height * s;
-      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-      URL.revokeObjectURL(url); res(c.toDataURL("image/jpeg", 0.82));
-    };
-    img.src = url;
-  });
-}
-
-const daysAgo = ts => ts ? Math.floor((Date.now() - ts) / DAY_MS) : null;
-const needsRenewal = item =>
-  PLATFORMS.filter(p => item.platforms.includes(p.id) && item.listedAt?.[p.id] && daysAgo(item.listedAt[p.id]) >= p.renewDays);
-
-// ─── AI calls ────────────────────────────────────────────────────────────────
-async function callClaude(prompt, maxTokens = 800) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
-  const d = await r.json();
-  const text = d.content?.map(b => b.text || "").join("") || "";
-  return JSON.parse(text.replace(/```json|```/g, "").trim());
-}
-
-async function generateListing(productDesc, platforms, condition, category) {
-  return callClaude(`You are an expert marketplace listing copywriter. The user may write in Turkish or English — always output in English.
-
-Product description: "${productDesc}"
-Condition: ${condition}, Category: ${category}
-Platforms: ${platforms.join(", ")}
-
-Return ONLY valid JSON (no markdown):
-{
-  "suggestedTitle": "general English title",
-  "suggestedPrice": "number only",
-  "suggestedCategory": "one of: Electronics, Clothing, Home & Garden, Toys, Sports, Automotive, Other",
-  "estimatedWeightLb": "number",
-  "estimatedWeightOz": "number",
-  "estimatedDimL": "number in inches",
-  "estimatedDimW": "number in inches",
-  "estimatedDimH": "number in inches",
-  "shippingRecommendation": "brief shipping strategy note in English",
-  "platforms": {
-    ${platforms.map(p => `"${p}": {"title": "optimized English title max 80 chars", "description": "optimized English description 3-5 sentences"}`).join(',\n    ')}
-  }
-}
-
-Platform title/desc rules (all English output):
-- ebay: keyword-dense, technical specs, SEO-optimized
-- facebook: friendly local tone, mention pickup/shipping
-- mercari: concise, highlight brand/model, honest about flaws
-- offerup: punchy, local focus, brief
-- poshmark: fashion/lifestyle tone, brand emphasis
-- craigslist: plain text, price upfront, no-nonsense
-- inspire: benefit-focused, lifestyle angle`, 1200);
-}
-
-async function generateRenewed(item, platformId) {
-  const p = PLATFORMS.find(x => x.id === platformId);
-  return callClaude(`Refresh this ${p?.name} listing for algorithm visibility. Slightly reword, keep meaning identical. Output English only.
-
-Title: "${item.platformTitles?.[platformId] || item.title}"
-Description: "${item.platformDescriptions?.[platformId] || item.description}"
-
-Return ONLY valid JSON:
-{"title": "reworded title max 80 chars", "description": "rewritten description 3-4 sentences"}`, 400);
-}
-
-async function fetchLatestFees() {
-  return callClaude(`You are a marketplace fee expert. Return the CURRENT seller fees for each platform as of 2025.
-Use your knowledge of the latest fee structures.
-
-Return ONLY valid JSON (no markdown):
-{
-  "ebay":       {"pct": number, "fixed": number, "paymentPct": number, "label": "short label", "note": "one line note"},
-  "facebook":   {"pct": number, "fixed": number, "paymentPct": number, "label": "short label", "note": "one line note"},
-  "mercari":    {"pct": number, "fixed": number, "paymentPct": number, "label": "short label", "note": "one line note"},
-  "offerup":    {"pct": number, "fixed": number, "paymentPct": number, "label": "short label", "note": "one line note"},
-  "poshmark":   {"pct": number, "fixed": number, "paymentPct": number, "label": "short label", "note": "one line note"},
-  "craigslist": {"pct": number, "fixed": number, "paymentPct": number, "label": "short label", "note": "one line note"},
-  "inspire":    {"pct": number, "fixed": number, "paymentPct": number, "label": "short label", "note": "one line note"}
-}`, 600);
-}
-
-// ─── CSS ─────────────────────────────────────────────────────────────────────
-const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
-*{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0A0A0F;--sf:#13131A;--sf2:#1C1C26;--bd:#2A2A38;
-  --a:#6EE7B7;--a2:#818CF8;--danger:#F87171;--warn:#FBBF24;
-  --txt:#F1F1F5;--mu:#6B6B82;--r:16px;
-}
-body{background:var(--bg);color:var(--txt);font-family:'DM Sans',sans-serif;min-height:100vh;overflow-x:hidden}
-.app{max-width:430px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column}
-
-.hdr{padding:20px 20px 0;position:sticky;top:0;z-index:100;background:var(--bg)}
-.hdr-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
-.logo{font-family:'Syne',sans-serif;font-weight:800;font-size:22px;letter-spacing:-.5px;
-  background:linear-gradient(135deg,var(--a),var(--a2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.logo span{font-weight:400;opacity:.7}
-.sync-btn{display:flex;align-items:center;gap:6px;background:linear-gradient(135deg,var(--a),var(--a2));
-  color:#000;border:none;border-radius:20px;padding:8px 14px;font-family:'DM Sans',sans-serif;
-  font-weight:500;font-size:13px;cursor:pointer;transition:opacity .2s,transform .15s}
-.sync-btn:active{transform:scale(.96);opacity:.9}
-.sync-btn.spin{opacity:.6;pointer-events:none}
-.tabs{display:flex;gap:3px;background:var(--sf);border-radius:12px;padding:4px;margin-bottom:4px}
-.tab{flex:1;padding:7px 2px;border:none;border-radius:9px;background:transparent;color:var(--mu);
-  font-family:'DM Sans',sans-serif;font-size:11px;font-weight:500;cursor:pointer;transition:all .2s;white-space:nowrap}
-.tab.active{background:var(--sf2);color:var(--txt);box-shadow:0 1px 4px rgba(0,0,0,.4)}
-.tab.warn-tab{color:var(--warn)}
-.content{flex:1;padding:16px 20px 100px;overflow-y:auto}
-
-.stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px}
-.sc{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:14px 12px;text-align:center}
-.sn{font-family:'Syne',sans-serif;font-size:22px;font-weight:700;color:var(--a);line-height:1}
-.sl{font-size:11px;color:var(--mu);margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
-.status-bar{background:var(--sf);border:1px solid var(--bd);border-radius:12px;
-  padding:10px 14px;margin-bottom:14px;display:flex;align-items:flex-start;gap:10px;font-size:12px}
-.sdot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:3px}
-.sdot.manual{background:var(--a2);box-shadow:0 0 6px var(--a2)}
-
-.pc{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);
-  padding:16px;margin-bottom:12px;cursor:pointer;transition:border-color .2s,transform .15s;position:relative;overflow:hidden}
-.pc:active{transform:scale(.99)}
-.pc:hover{border-color:var(--a2)}
-.pc::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:linear-gradient(180deg,var(--a),var(--a2))}
-.pc.urgent::before{background:linear-gradient(180deg,var(--danger),var(--warn))}
-.thumb{width:56px;height:56px;border-radius:10px;object-fit:cover;flex-shrink:0;border:1px solid var(--bd)}
-.thumb-ph{width:56px;height:56px;border-radius:10px;background:var(--sf2);
-  border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
-.ph{display:flex;gap:10px;margin-bottom:10px;align-items:flex-start}
-.phi{flex:1;min-width:0}
-.pt{font-family:'Syne',sans-serif;font-weight:600;font-size:15px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pp{font-family:'Syne',sans-serif;font-weight:700;font-size:16px;color:var(--a);margin-top:2px}
-.pm{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-.badge{font-size:11px;padding:3px 8px;border-radius:20px;border:1px solid var(--bd);color:var(--mu);background:var(--sf2)}
-.badge.cond{color:var(--a);border-color:var(--a);opacity:.8}
-.badge.stk{color:var(--a2);border-color:var(--a2)}
-.badge.warn{color:var(--warn);border-color:var(--warn)}
-.badge.hot{color:var(--danger);border-color:var(--danger)}
-.pchips{display:flex;flex-wrap:wrap;gap:5px}
-.chip{font-size:11px;padding:3px 8px;border-radius:20px;font-weight:500}
-.chip.on{background:rgba(110,231,183,.12);color:var(--a);border:1px solid rgba(110,231,183,.3)}
-.chip.off{background:var(--sf2);color:var(--mu);border:1px solid var(--bd);text-decoration:line-through;opacity:.5}
-.ca{display:flex;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid var(--bd)}
-.btn{flex:1;padding:8px;border-radius:10px;border:1px solid var(--bd);background:transparent;
-  color:var(--mu);font-family:'DM Sans',sans-serif;font-size:12px;cursor:pointer;transition:all .2s}
-.btn:hover{border-color:var(--a2);color:var(--a2)}
-.btn.d:hover{border-color:var(--danger);color:var(--danger)}
-.btn.pri{background:linear-gradient(135deg,rgba(110,231,183,.15),rgba(129,140,248,.15));border-color:var(--a);color:var(--a)}
-.btn.sold{background:rgba(248,113,113,.1);border-color:var(--danger);color:var(--danger)}
-
-.stitle{font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;
-  letter-spacing:1px;color:var(--mu);margin-bottom:10px}
-.fg{margin-bottom:12px}
-.fl{display:block;font-size:12px;color:var(--mu);margin-bottom:6px;font-weight:500}
-.fi,.fta,.fsel{width:100%;background:var(--sf);border:1px solid var(--bd);border-radius:10px;
-  padding:12px 14px;color:var(--txt);font-family:'DM Sans',sans-serif;font-size:14px;outline:none;transition:border-color .2s;appearance:none}
-.fi:focus,.fta:focus,.fsel:focus{border-color:var(--a2)}
-.fta{resize:vertical;min-height:90px}
-.frow{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.frow3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
-select option{background:#1C1C26}
-
-/* ── PLATFORM SETTINGS ── */
-.plat-list{display:flex;flex-direction:column;gap:8px;margin-bottom:20px}
-.plat-row{background:var(--sf);border:1px solid var(--bd);border-radius:12px;overflow:hidden;transition:border-color .2s}
-.plat-row.sel{border-color:rgba(110,231,183,.4)}
-.plat-header{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;user-select:none}
-.plat-header-info{flex:1;min-width:0}
-.plat-header-name{font-size:14px;font-weight:500}
-.plat-header-sub{font-size:11px;color:var(--mu);margin-top:1px}
-.plat-chk{width:20px;height:20px;border-radius:6px;border:2px solid var(--bd);
-  display:flex;align-items:center;justify-content:center;transition:all .2s;font-size:11px;flex-shrink:0}
-.plat-row.sel .plat-chk{background:var(--a);border-color:var(--a);color:#000}
-.plat-expand{padding:0 14px 14px;border-top:1px solid var(--bd);display:none}
-.plat-row.sel .plat-expand{display:block}
-.plat-expand-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
-.mini-label{font-size:11px;color:var(--mu);margin-bottom:4px;font-weight:500}
-.mini-input,.mini-select{width:100%;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;
-  padding:8px 10px;color:var(--txt);font-family:'DM Sans',sans-serif;font-size:13px;outline:none;transition:border-color .2s;appearance:none}
-.mini-input:focus,.mini-select:focus{border-color:var(--a2)}
-.price-override-note{font-size:11px;color:var(--mu);margin-top:4px}
-.price-override-note span{color:var(--a)}
-
-/* shipping cost field */
-.shipping-cost-wrap{margin-top:8px}
-
-/* ── FEE CALCULATOR ── */
-.fee-calc{background:linear-gradient(135deg,rgba(110,231,183,.06),rgba(129,140,248,.06));border:1px solid rgba(110,231,183,.2);border-radius:10px;padding:10px 12px;margin-top:8px}
-.fee-calc-row{display:flex;align-items:center;justify-content:space-between;padding:3px 0}
-.fee-calc-label{font-size:11px;color:var(--mu)}
-.fee-calc-val{font-size:12px;font-weight:500}
-.fee-calc-val.negative{color:var(--danger)}
-.fee-calc-val.positive{color:var(--a)}
-.fee-calc-divider{height:1px;background:var(--bd);margin:6px 0}
-.fee-calc-net{display:flex;align-items:center;justify-content:space-between;padding-top:4px}
-.fee-calc-net-label{font-family:"Syne",sans-serif;font-size:12px;font-weight:700;color:var(--txt)}
-.fee-calc-net-val{font-family:"Syne",sans-serif;font-size:16px;font-weight:800;color:var(--a)}
-.fee-calc-note{font-size:10px;color:var(--mu);margin-top:4px;line-height:1.4}
-.fee-refresh-btn{display:flex;align-items:center;gap:6px;padding:8px 14px;background:transparent;border:1px solid var(--bd);border-radius:20px;color:var(--mu);font-family:"DM Sans",sans-serif;font-size:12px;cursor:pointer;transition:all .2s}
-.fee-refresh-btn:hover{border-color:var(--a2);color:var(--a2)}
-.fee-refresh-btn:disabled{opacity:.5;cursor:not-allowed}
-
-/* ── NOTIFICATIONS ── */
-.notif-dot{position:absolute;top:-2px;right:-2px;width:8px;height:8px;border-radius:50%;background:var(--danger);border:2px solid var(--bg)}
-.notif-tab-wrap{position:relative;display:inline-block}
-.notif-card{background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:10px;position:relative;overflow:hidden;transition:border-color .2s}
-.notif-card.unread{border-color:rgba(248,113,113,.4)}
-.notif-card.unread::before{content:"";position:absolute;top:0;left:0;width:3px;height:100%;background:var(--danger)}
-.notif-card.sale{border-color:rgba(110,231,183,.4)}
-.notif-card.sale::before{content:"";position:absolute;top:0;left:0;width:3px;height:100%;background:var(--a)}
-.notif-card.offer{border-color:rgba(251,191,36,.4)}
-.notif-card.offer::before{content:"";position:absolute;top:0;left:0;width:3px;height:100%;background:var(--warn)}
-.notif-card.message{border-color:rgba(129,140,248,.4)}
-.notif-card.message::before{content:"";position:absolute;top:0;left:0;width:3px;height:100%;background:var(--a2)}
-.notif-header{display:flex;align-items:flex-start;gap:10px;margin-bottom:8px}
-.notif-icon{font-size:20px;flex-shrink:0}
-.notif-body{flex:1}
-.notif-title{font-family:"Syne",sans-serif;font-size:14px;font-weight:600;line-height:1.3}
-.notif-sub{font-size:12px;color:var(--mu);margin-top:2px}
-.notif-time{font-size:11px;color:var(--mu);white-space:nowrap}
-.notif-action{display:flex;align-items:center;gap:8px;margin-top:8px}
-.notif-open{padding:6px 14px;background:transparent;border:1px solid var(--bd);border-radius:20px;
-  color:var(--mu);font-family:"DM Sans",sans-serif;font-size:12px;cursor:pointer;transition:all .2s}
-.notif-open:hover{border-color:var(--a2);color:var(--a2)}
-.notif-dismiss{padding:6px 10px;background:transparent;border:none;color:var(--mu);font-size:12px;cursor:pointer;transition:color .2s}
-.notif-dismiss:hover{color:var(--danger)}
-.check-all-btn{width:100%;padding:12px;background:linear-gradient(135deg,rgba(129,140,248,.15),rgba(110,231,183,.15));
-  border:1px solid var(--a2);border-radius:12px;color:var(--a2);font-family:"Syne",sans-serif;
-  font-weight:700;font-size:14px;cursor:pointer;transition:all .2s;margin-bottom:16px}
-.check-all-btn:disabled{opacity:.5;cursor:not-allowed}
-.notif-empty{text-align:center;padding:50px 20px;color:var(--mu)}
-.notif-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;
-  border-radius:9px;background:var(--danger);color:#fff;font-size:10px;font-weight:700;padding:0 4px;margin-left:4px}
-
-/* ── ACCOUNTS ── */
-.acc-card{background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:10px}
-.acc-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--bd)}
-.acc-row:last-child{border-bottom:none}
-.acc-label-input{flex:1;background:var(--sf2);border:1px solid var(--bd);border-radius:8px;
-  padding:6px 10px;color:var(--txt);font-family:"DM Sans",sans-serif;font-size:13px;outline:none}
-.acc-label-input:focus{border-color:var(--a2)}
-.acc-add-btn{padding:6px 12px;background:rgba(110,231,183,.1);border:1px solid rgba(110,231,183,.3);
-  border-radius:8px;color:var(--a);font-family:"DM Sans",sans-serif;font-size:12px;cursor:pointer;transition:all .2s}
-.acc-add-btn:hover{background:rgba(110,231,183,.2)}
-.acc-del-btn{padding:6px 8px;background:transparent;border:none;color:var(--mu);font-size:14px;cursor:pointer;transition:color .2s}
-.acc-del-btn:hover{color:var(--danger)}
-.equalize-btn{display:inline-flex;align-items:center;gap:4px;margin-top:6px;padding:5px 10px;
-  background:rgba(110,231,183,.1);border:1px solid rgba(110,231,183,.35);border-radius:20px;
-  color:var(--a);font-family:"DM Sans",sans-serif;font-size:11px;font-weight:500;cursor:pointer;transition:all .2s}
-.equalize-btn:hover{background:rgba(110,231,183,.2);border-color:var(--a)}
-
-/* ── AI panel ── */
-.ai-panel{background:linear-gradient(135deg,rgba(129,140,248,.08),rgba(110,231,183,.08));
-  border:1px solid rgba(129,140,248,.3);border-radius:14px;padding:16px;margin-bottom:20px}
-.ai-title{font-family:'Syne',sans-serif;font-size:14px;font-weight:700;
-  background:linear-gradient(135deg,var(--a2),var(--a));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}
-.ai-sub{font-size:11px;color:var(--mu);margin-bottom:10px}
-.ai-row{display:flex;gap:8px}
-.ai-input{flex:1;background:var(--sf);border:1px solid var(--bd);border-radius:10px;
-  padding:10px 12px;color:var(--txt);font-family:'DM Sans',sans-serif;font-size:13px;outline:none;transition:border-color .2s}
-.ai-input:focus{border-color:var(--a2)}
-.ai-go{padding:10px 16px;background:linear-gradient(135deg,var(--a2),var(--a));border:none;
-  border-radius:10px;color:#000;font-family:'Syne',sans-serif;font-weight:700;font-size:13px;
-  cursor:pointer;white-space:nowrap;transition:opacity .2s}
-.ai-go:disabled{opacity:.4;cursor:not-allowed}
-.ai-results{margin-top:14px}
-.ai-tabs{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;scrollbar-width:none;margin-bottom:10px}
-.ai-tab{padding:5px 12px;border-radius:20px;border:1px solid var(--bd);background:transparent;
-  color:var(--mu);font-size:12px;cursor:pointer;white-space:nowrap;font-family:'DM Sans',sans-serif;transition:all .2s}
-.ai-tab.active{border-color:var(--a2);color:var(--a2);background:rgba(129,140,248,.1)}
-.ai-field{margin-bottom:10px}
-.ai-flabel{font-size:11px;color:var(--mu);margin-bottom:4px;font-weight:500;text-transform:uppercase;letter-spacing:.5px}
-.ai-fval{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.5;color:var(--txt)}
-.ai-ship-box{background:var(--sf);border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:10px 12px;
-  font-size:12px;color:var(--warn);line-height:1.5;margin-bottom:10px}
-.ai-apply{width:100%;padding:12px;background:linear-gradient(135deg,var(--a),var(--a2));border:none;
-  border-radius:12px;color:#000;font-family:'Syne',sans-serif;font-weight:700;font-size:14px;cursor:pointer}
-
-/* photos */
-.photo-sect{margin-bottom:20px}
-.photo-acts{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
-.photo-btn{display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 10px;
-  background:var(--sf);border:1.5px dashed var(--bd);border-radius:14px;
-  color:var(--mu);font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s}
-.photo-btn:hover{border-color:var(--a2);color:var(--a2)}
-.pgrid5{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
-.ptw{position:relative;aspect-ratio:1;border-radius:10px;overflow:hidden;border:1px solid var(--bd);cursor:pointer}
-.ptw img{width:100%;height:100%;object-fit:cover}
-.ptw.cv::after{content:'Kapak';position:absolute;bottom:0;left:0;right:0;
-  background:rgba(110,231,183,.9);color:#000;font-size:9px;font-weight:700;text-align:center;padding:2px}
-.prm{position:absolute;top:3px;right:3px;width:18px;height:18px;border-radius:50%;
-  background:rgba(0,0,0,.8);border:none;color:#fff;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center}
-
-/* shipping section */
-.ship-sect{background:var(--sf);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:20px}
-.ship-ai-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--a2);
-  background:rgba(129,140,248,.1);border:1px solid rgba(129,140,248,.3);border-radius:20px;padding:2px 8px;margin-left:8px}
-
-/* submit */
-.sub{width:100%;padding:16px;background:linear-gradient(135deg,var(--a),var(--a2));
-  border:none;border-radius:14px;color:#000;font-family:'Syne',sans-serif;font-weight:700;font-size:15px;cursor:pointer;transition:opacity .2s,transform .15s}
-.sub:active{transform:scale(.98)}
-
-/* renewal */
-.renew-card{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:14px;margin-bottom:10px;position:relative;overflow:hidden}
-.renew-card::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:var(--warn)}
-.renew-card.urgent::before{background:var(--danger)}
-.renew-btn{width:100%;padding:10px;background:linear-gradient(135deg,rgba(251,191,36,.12),rgba(248,113,113,.12));
-  border:1px solid var(--warn);border-radius:10px;color:var(--warn);
-  font-family:'Syne',sans-serif;font-weight:700;font-size:13px;cursor:pointer;transition:all .2s}
-.renew-btn:disabled{opacity:.5;cursor:not-allowed}
-
-/* modal */
-.ov{position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(4px);z-index:200;display:flex;align-items:flex-end}
-.modal{background:var(--sf);border-radius:24px 24px 0 0;padding:24px 20px 40px;width:100%;
-  max-height:88vh;overflow-y:auto;animation:su .3s cubic-bezier(.34,1.56,.64,1)}
-@keyframes su{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
-.mh{width:36px;height:4px;background:var(--bd);border-radius:2px;margin:0 auto 20px}
-.mt{font-family:'Syne',sans-serif;font-size:18px;font-weight:700;margin-bottom:16px}
-.mphotos{display:flex;gap:8px;overflow-x:auto;padding-bottom:8px;scrollbar-width:none;margin-bottom:16px}
-.mphotos img{width:80px;height:80px;border-radius:10px;object-fit:cover;flex-shrink:0;border:1px solid var(--bd)}
-.prow{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--bd)}
-.prow:last-child{border-bottom:none}
-.toggle{width:44px;height:24px;border-radius:12px;background:var(--bd);position:relative;cursor:pointer;transition:background .2s;border:none}
-.toggle.on{background:var(--a)}
-.knob{width:18px;height:18px;background:#fff;border-radius:50%;position:absolute;top:3px;left:3px;transition:transform .2s;box-shadow:0 1px 4px rgba(0,0,0,.3)}
-.toggle.on .knob{transform:translateX(20px)}
-
-/* settings */
-.set-card{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:16px;margin-bottom:12px}
-.set-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--bd)}
-.set-row:last-child{border-bottom:none}
-
-/* misc */
-.fab{position:fixed;bottom:88px;right:20px;width:54px;height:54px;border-radius:50%;
-  background:linear-gradient(135deg,var(--a),var(--a2));border:none;color:#000;font-size:24px;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;
-  box-shadow:0 4px 20px rgba(110,231,183,.35);transition:transform .2s;z-index:149}
-.fab:active{transform:scale(.93)}
-.toast{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:var(--sf2);
-  border:1px solid var(--a);color:var(--txt);padding:10px 20px;border-radius:20px;
-  font-size:13px;font-weight:500;z-index:999;animation:ti .3s ease,to_ .3s ease 2.2s forwards;white-space:nowrap}
-@keyframes ti{from{opacity:0;top:0}to{opacity:1;top:20px}}
-@keyframes to_{from{opacity:1;top:20px}to{opacity:0;top:0}}
-.empty{text-align:center;padding:60px 20px;color:var(--mu)}
-.empty-icon{font-size:48px;margin-bottom:16px;opacity:.5}
-.empty-title{font-family:'Syne',sans-serif;font-size:18px;font-weight:600;color:var(--txt);margin-bottom:8px}
-.sb{display:flex;align-items:center;gap:10px;background:var(--sf);border:1px solid var(--bd);border-radius:12px;padding:10px 14px;margin-bottom:12px}
-.sb input{flex:1;background:transparent;border:none;color:var(--txt);font-family:'DM Sans',sans-serif;font-size:14px;outline:none}
-.sb input::placeholder{color:var(--mu)}
-.fchips{display:flex;gap:8px;overflow-x:auto;margin-bottom:14px;padding-bottom:4px;scrollbar-width:none}
-.fchip{white-space:nowrap;padding:5px 12px;border-radius:20px;border:1px solid var(--bd);background:transparent;
-  color:var(--mu);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all .2s}
-.fchip.active{border-color:var(--a2);color:var(--a2);background:rgba(129,140,248,.1)}
-.cblock{background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:12px;font-size:12px;color:var(--mu);line-height:1.6}
-.spinner{display:inline-block;animation:spin 1s linear infinite}
+block;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .divider{height:1px;background:var(--bd);margin:20px 0}
 `;
@@ -492,6 +15,9 @@ export default function SellSync() {
   const [filterP, setFilterP]     = useState("all");
   const [apiKey, setApiKey]       = useState(loadKey);
   const [showKey, setShowKey]     = useState(false);
+  const [ebayKeys, setEbayKeys]   = useState(loadEbayKeys);
+  const [showEbaySecret, setShowEbaySecret] = useState(false);
+  const ebayConnected = !!(ebayKeys.clientId && ebayKeys.clientSecret);
   const [fees, setFees]           = useState(loadFees);
   const [refreshingFees, setRefreshingFees] = useState(false);
   const [feesLastUpdated, setFeesLastUpdated] = useState(() => { try { return localStorage.getItem("sellsync_fees_ts") || null; } catch { return null; } });
@@ -518,6 +44,7 @@ export default function SellSync() {
   useEffect(() => { saveKey(apiKey); }, [apiKey]);
 
   useEffect(() => { saveAccounts(accounts); }, [accounts]);
+  useEffect(() => { saveEbayKeys(ebayKeys); }, [ebayKeys]);
   useEffect(() => { saveNotifs(notifs); }, [notifs]);
 
   const toast_ = msg => { setToast(msg); setTimeout(() => setToast(null), 2600); };
@@ -871,10 +398,14 @@ export default function SellSync() {
               <div className="sc"><div className="sn">${totalValue.toFixed(0)}</div><div className="sl">Değer</div></div>
             </div>
             <div className="status-bar">
-              <div className="sdot manual" />
+              <div className={`sdot ${ebayConnected ? "live" : "manual"}`} />
               <div>
-                <div style={{ fontWeight: 500, fontSize: 13 }}>Manuel Mod — eBay API onayı bekleniyor</div>
-                <div style={{ fontSize: 11, color: "var(--mu)", marginTop: 2 }}>API bağlandığında otomatik moda geçilecek.</div>
+                <div style={{ fontWeight: 500, fontSize: 13 }}>
+                  {ebayConnected ? "eBay API Bağlı ✅" : "Manuel Mod — eBay API bağlı değil"}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--mu)", marginTop: 2 }}>
+                  {ebayConnected ? "eBay'e otomatik listeleme aktif. Diğer platformlar sunucu bekliyor." : "Ayarlar'dan eBay API key girerek otomatik moda geç."}
+                </div>
               </div>
             </div>
             <div className="sb">
@@ -1318,6 +849,52 @@ export default function SellSync() {
                 </button>
               </div>
               {apiKey && <div style={{ fontSize: 11, color: "var(--a)", marginTop: 8 }}>✅ Key kaydedildi</div>}
+            </div>
+
+            <div className="set-card">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <div className="stitle" style={{ marginBottom: 0 }}>eBay API Bağlantısı</div>
+                {ebayConnected && <span style={{ fontSize: 11, color: "var(--a)", background: "rgba(110,231,183,.1)", border: "1px solid rgba(110,231,183,.3)", borderRadius: 20, padding: "3px 10px" }}>✅ Bağlı</span>}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--mu)", marginBottom: 14, lineHeight: 1.5 }}>
+                eBay Developer hesabından aldığın key'leri gir. Kaydettiğin App ID ve Client Secret burada.
+              </div>
+
+              <div className="fg">
+                <label className="fl">App ID (Client ID)</label>
+                <input className="fi" type="text" placeholder="Celalett-SellSync-PRD-..."
+                  value={ebayKeys.clientId}
+                  onChange={e => setEbayKeys(k => ({ ...k, clientId: e.target.value }))} />
+              </div>
+
+              <div className="fg">
+                <label className="fl">Client Secret (Cert ID)</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input className="fi" type={showEbaySecret ? "text" : "password"} placeholder="PRD-..."
+                    value={ebayKeys.clientSecret}
+                    onChange={e => setEbayKeys(k => ({ ...k, clientSecret: e.target.value }))}
+                    style={{ flex: 1 }} />
+                  <button className="btn" style={{ flex: "none", padding: "0 14px" }} onClick={() => setShowEbaySecret(v => !v)}>
+                    {showEbaySecret ? "Gizle" : "Göster"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="fg">
+                <label className="fl">Dev ID (opsiyonel)</label>
+                <input className="fi" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                  value={ebayKeys.devId}
+                  onChange={e => setEbayKeys(k => ({ ...k, devId: e.target.value }))} />
+              </div>
+
+              {ebayConnected
+                ? <div style={{ fontSize: 12, color: "var(--a)", padding: "10px 14px", background: "rgba(110,231,183,.08)", border: "1px solid rgba(110,231,183,.2)", borderRadius: 10 }}>
+                    ✅ eBay API bağlı! Ürün eklerken eBay'e otomatik listeleme aktif.
+                  </div>
+                : <div style={{ fontSize: 12, color: "var(--mu)", padding: "10px 14px", background: "var(--sf2)", borderRadius: 10 }}>
+                    ⚠️ Key girilmedi. Manuel mod aktif.
+                  </div>
+              }
             </div>
 
             <div className="set-card">
