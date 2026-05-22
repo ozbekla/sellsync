@@ -648,11 +648,11 @@ function SellSync() {
         toast_('✅ eBay'de listelendi!');
       } else {
         console.error('eBay list error:', listData);
-        toast_('⚠️ eBay listeleme: ' + (listData.error?.message || 'Hata oluştu'));
+        toast_('eBay hata: ' + (listData.error?.message || 'Hata oluştu'));
       }
     } catch(e) {
       console.error('eBay error:', e);
-      toast_('⚠️ eBay bağlantı hatası');
+      toast_('eBay baglanti hatasi');
     }
   };
 
@@ -668,7 +668,7 @@ function SellSync() {
       toast_("✅ Güncellendi");
     } else {
       setInventory(inv => [newItem, ...inv]);
-      toast_("✅ Eklendi — platformlara listeleniyor…");
+      toast_("Eklendi - listeleniyor...");
       // List on eBay if selected and connected
       if (form.platforms.includes('ebay') && ebayConnected) {
         listOnEbay(newItem);
