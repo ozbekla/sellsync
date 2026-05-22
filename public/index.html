@@ -2,18 +2,25 @@
 <html lang="tr">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#0A0A0F" />
   <title>SellSync</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0A0A0F; }
+  </style>
 </head>
-<body style="margin:0;padding:0;background:#0A0A0F;">
+<body>
   <div id="root"></div>
-  <script type="text/babel">
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
 import { useState, useEffect, useRef } from "react";
 
 // constants ----------------------------------------------------------------
@@ -501,7 +508,7 @@ select option{background:#1C1C26}
 `;
 
 // component ----------------------------------------------------------------
-export default function SellSync() {
+function SellSync() {
   const [tab, setTab]             = useState("inventory");
   const [inventory, setInventory] = useState(load);
   const [editItem, setEditItem]   = useState(null);
@@ -1564,8 +1571,9 @@ export default function SellSync() {
   );
 }
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(React.createElement(SellSync));
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(SellSync));
   </script>
 </body>
 </html>
