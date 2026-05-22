@@ -16,6 +16,7 @@
   <div id="root"></div>
   <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef, useCallback } = React;
+const SERVER_URL = 'https://sellsync-server-production.up.railway.app';
 
 
 // constants ----------------------------------------------------------------
@@ -623,18 +624,55 @@ function SellSync() {
     toast_("✅ AI içerik + kargo tahmini uygulandı!");
   };
 
+  // eBay listing via server
+  const listOnEbay = async (item) => {
+    if (!ebayKeys.clientId || !ebayKeys.clientSecret) return;
+    try {
+      // Get token
+      const tokenRes = await fetch(SERVER_URL + '/ebay/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId: ebayKeys.clientId, clientSecret: ebayKeys.clientSecret })
+      });
+      const tokenData = await tokenRes.json();
+      if (!tokenData.access_token) throw new Error('Token alınamadı');
+
+      // List item
+      const listRes = await fetch(SERVER_URL + '/ebay/list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accessToken: tokenData.access_token, item })
+      });
+      const listData = await listRes.json();
+      if (listData.success) {
+        toast_('✅ eBay'de listelendi!');
+      } else {
+        console.error('eBay list error:', listData);
+        toast_('⚠️ eBay listeleme: ' + (listData.error?.message || 'Hata oluştu'));
+      }
+    } catch(e) {
+      console.error('eBay error:', e);
+      toast_('⚠️ eBay bağlantı hatası');
+    }
+  };
+
   // save
-  const saveItem = () => {
+  const saveItem = async () => {
     if (!form.title || !form.price) return toast_("⚠️ Başlık ve fiyat zorunlu");
     const now = Date.now();
     const listedAt = { ...(form.listedAt || {}) };
     form.platforms.forEach(pid => { if (!listedAt[pid]) listedAt[pid] = now; });
+    const newItem = { ...form, id: editItem || genId(), createdAt: now, soldOn: [], listedAt };
     if (editItem) {
-      setInventory(inv => inv.map(i => i.id === editItem ? { ...form, id: editItem, updatedAt: now, listedAt } : i));
+      setInventory(inv => inv.map(i => i.id === editItem ? { ...newItem, id: editItem, updatedAt: now } : i));
       toast_("✅ Güncellendi");
     } else {
-      setInventory(inv => [{ ...form, id: genId(), createdAt: now, soldOn: [], listedAt }, ...inv]);
-      toast_("✅ Eklendi");
+      setInventory(inv => [newItem, ...inv]);
+      toast_("✅ Eklendi — platformlara listeleniyor…");
+      // List on eBay if selected and connected
+      if (form.platforms.includes('ebay') && ebayConnected) {
+        listOnEbay(newItem);
+      }
     }
     setTab("inventory"); reset();
   };
