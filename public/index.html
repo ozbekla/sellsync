@@ -645,7 +645,7 @@ function SellSync() {
       });
       const listData = await listRes.json();
       if (listData.success) {
-        toast_('✅ eBay'de listelendi!');
+        toast_('eBay listelendi!');
       } else {
         console.error('eBay list error:', listData);
         toast_('eBay hata: ' + (listData.error?.message || 'Hata oluştu'));
